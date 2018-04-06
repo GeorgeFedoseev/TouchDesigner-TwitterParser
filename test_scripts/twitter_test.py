@@ -1,18 +1,40 @@
 # =* coding: utf-8 *=
+
+import platform
 import sys
+import queue
+import threading
+
+import time
+#print(platform.system())
+
+packages_path = ""
+cache_dir_path = ""
+
+if platform.system() == "Darwin":
+    packages_path = "/Users/Shared/TD-Python/lib/python3.5/site-packages"
+    cache_dir_path = "/Users/Shared/TouchDesigner-Twitter-Cache"
+else:
+    packages_path = "C:\\TD-Python\\Lib\\site-packages"
+    cache_dir_path = "C:\\Users\\Public\\Documents\\TouchDesigner-Twitter-Cache"
+
+if packages_path not in sys.path:
+    sys.path.append(packages_path)
+
+#print(sys.path)
+
 import os
 import requests
 from pprint import pprint
-
-import threading
 
 from twython import Twython
 APP_KEY = 'hGnpvU4F3zE6jFJC6bbYtlm3z'
 APP_SECRET = 'hUYfBmmHZPlLXwZpyhIBCEEigbRoK9NQxSDquqa7VT0EiQqbHh'
 
 
-curr_dir_path = os.path.dirname(os.path.realpath(__file__))
-cache_dir_path = os.path.join(curr_dir_path, 'cache/')
+
+
+#cache_dir_path = os.path.join(curr_dir_path, 'cache/')
 if not os.path.exists(cache_dir_path):
     os.makedirs(cache_dir_path)
 
@@ -37,6 +59,17 @@ def get_media(s):
 
 
 def get_photo(s):
+    media = get_media(s)
+
+    if media:
+        for m in media:
+            if m['type'] == 'photo':
+                #print('has photo')
+                return m['media_url']
+
+    return None
+
+def get_profile_picture(s):
     media = get_media(s)
 
     if media:
@@ -120,9 +153,10 @@ def maybe_download_video(s):
     return thumb_path, video_path
 
 
-def dictlist_to_2d_array(dictlist, header):
+def dictlist_to_2d_array(dictlist, header, include_header=False):
     res = [[item.get(key, '') for key in header] for item in dictlist]
-    res.insert(0, header)
+    if include_header:
+        res.insert(0, header)
     return res
 
 
@@ -130,14 +164,25 @@ def dictlist_to_2d_array(dictlist, header):
 
 #print(requests.get("http://google.com").text)
 
+currentQuery = ""
 
+def process_query(query, max_id=0, since_id=0, min_posts=20):
+    global isBusy
+    global currentQuery
 
-def process_query(query, max_id=0, min_posts=20):
+    # check if we still need this data
+    if currentQuery != query:
+        exitProcessingThread()
+        
+    print("Process query %s with max_id=%i, since_id=%i, min_posts=%i" % (query, max_id, since_id, min_posts))
+
     results = []
 
-    statuses = twitter.search(q=query, result_type='recent', count=100, include_entities=True, max_id=max_id)
+    print('request query: %s' % query)
+    statuses = twitter.search(q=query, result_type='recent', count=100, include_entities=True, max_id=max_id, since_id=since_id)
     
-    #pprint(statuses)
+    print('got %i statuses' % len(statuses["statuses"]))
+    pprint(statuses)
 
     photos_count = 0
     videos_count = 0
@@ -148,16 +193,25 @@ def process_query(query, max_id=0, min_posts=20):
     current_min_id = 9223372036854775807
 
     for s in statuses["statuses"]:
+        # check if we still need this data
+        if currentQuery != query:
+            exitProcessingThread()
+
         total_count += 1
 
         tweet_id = s['id']
+
+        if is_in_current_table(tweet_id):
+            continue
 
         if tweet_id < current_min_id:
             current_min_id = tweet_id
 
         is_retweet = 'retweeted_status' in s
         if is_retweet:
-            continue            
+            continue           
+
+
 
 
         text = s['text']
@@ -211,16 +265,18 @@ def process_query(query, max_id=0, min_posts=20):
         results.append(res)  
 
 
-    if len(results) < min_posts:
-        #print("Not enough posts (%i), get more, current_min_id = %i" % (len(results), current_min_id))
-        results += process_query(query, max_id=current_min_id, min_posts=(min_posts - len(results)))
+    if len(results) > 0:
+        if len(results) < min_posts:
+            #print("Not enough posts (%i), get more, current_min_id = %i" % (len(results), current_min_id))
+            results += process_query(query, max_id=(current_min_id-1), min_posts=(min_posts - len(results)))
+    else:
+        print("No more results for query %s" % query)
     
+    results = sorted(results, key=lambda x: x["id"])
     return results
     
 
-def get_table_for_query(query, min_posts=50):
-    posts = process_query(query, min_posts=min_posts)
-
+def get_table_for_posts(posts, include_header=False):
     table = dictlist_to_2d_array(posts, [
         'id',
         'is_retweet',
@@ -229,28 +285,48 @@ def get_table_for_query(query, min_posts=50):
         'has_photo', 'photo_url', "photo_path",
         'has_video', 'video_thumbnail_url', 'mp4_url', "video_thumbnail_path", "mp4_path",
         'created_at'
-    ])
+    ], include_header)
 
-    pprint(posts)
-    print("%i posts" % len(posts))
+    #pprint(posts)
+    #print("%i posts" % len(posts))
 
     return table
 
+def is_in_current_table(id):
+    global currentTableData
+    for row in currentTableData:
+        if row[0] == id:
+            return True
+    return False
 
-callback_queue = Queue.Queue()
+def exitProcessingThread():
+    global isBusy
+    print("Terminating processing, query has changed to %s" % currentQuery)
+    isBusy = False
+    sys.exit()
 
-def from_main_thread_nonblocking():
-    while True:
-        try:
-            callback = callback_queue.get(False) #doesn't block
-        except Queue.Empty: #raised when queue is empty
-            break
-        callback()         
+# TOUCH DESIGNER FUNCTIONS
 
+_scriptOp = None
+callback_queue = queue.Queue()
+
+
+isBusy = False
+
+isQueryInUpdateMode = False
+currentMaxId = 0
+
+currentTableData = []
+
+DEFAULT_PROCESS_EVERY_SEC = 5
+
+last_time_processed_query = 0
 
 
 if __name__ == "__main__":
-    t = threading.Thread(target=get_table_for_query, args=["#asd"])
+
+    currentQuery = "#check"
+    t = threading.Thread(target=process_query, args=[currentQuery])
     t.daemon = True
     t.start()
     t.join()
