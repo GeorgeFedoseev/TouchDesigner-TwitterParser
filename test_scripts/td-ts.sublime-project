@@ -5,10 +5,10 @@
 			"file_regex": "^[ ]*File \"(...*?)\", line ([0-9]*)",
 			"name": "Anaconda Python Builder",
 			"selector": "source.python",
-			"shell_cmd": "\"C:\\TD-Python\\Scripts\\python\" -u \"$file\"",            
-            "env": {
-                "PYTHONIOENCODING": "utf-8"
-            }
+			"shell_cmd": "\"/Users/Shared/TD-Python/bin/python\" -u \"$file\"",
+			"env": {
+				"PYTHONIOENCODING": "UTF8"
+			}
 		}
 	],
 	"folders":
